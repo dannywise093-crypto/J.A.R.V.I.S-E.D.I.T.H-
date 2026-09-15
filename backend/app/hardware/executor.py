@@ -10,9 +10,16 @@ class AuthorizedHardwareExecutor:
     def __init__(self, permissions: PermissionManager) -> None:
         self.permissions = permissions
 
-    async def execute(self, device_id: str, capability: str, action: str, parameters: dict) -> dict:
+    async def execute(
+        self,
+        device_id: str,
+        capability: str,
+        action: str,
+        parameters: dict,
+        session_id: str | None = None,
+    ) -> dict:
         spec = get_capability(capability)
-        grant = self.permissions.require(device_id, spec.name)
+        grant = self.permissions.require(device_id, spec.name, session_id)
         return {
             "status": "authorized_transport_pending",
             "device_id": device_id,
