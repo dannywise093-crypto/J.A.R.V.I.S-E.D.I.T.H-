@@ -6,18 +6,22 @@ from .core.config import settings
 from .core.permissions import PermissionManager, PermissionMode
 from .core.security import require_api_token
 from .hardware.capabilities import CAPABILITIES, get_capability
+from .hardware.executor import AuthorizedHardwareExecutor
 from .llm.provider import get_llm_provider
 from .memory.store import MemoryStore
 from .tools.device_registry import DeviceRegistry
 from .tools.registry import ToolRegistry
 from .tools.system_status import get_system_status
+from .vision.openai_adapter import OpenAIVisionAdapter
 from .voice.openai_adapter import build_openai_voice_service
 
-app = FastAPI(title=settings.app_name, version="0.3.0")
+app = FastAPI(title=settings.app_name, version="0.4.0")
 memory = MemoryStore()
 devices = DeviceRegistry()
 tools = ToolRegistry()
 permissions = PermissionManager()
+hardware = AuthorizedHardwareExecutor(permissions)
+vision = OpenAIVisionAdapter()
 tools.register("system.status", get_system_status)
 tools.register("devices.list", devices.list)
 
@@ -44,9 +48,16 @@ class PermissionGrantRequest(PermissionRequest):
     mode: PermissionMode
 
 
+class HardwareActionRequest(BaseModel):
+    device_id: str = Field(min_length=1, max_length=200)
+    capability: str = Field(min_length=1, max_length=100)
+    action: str = Field(min_length=1, max_length=100)
+    parameters: dict = Field(default_factory=dict)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name, "version": "0.3.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "0.4.0"}
 
 
 @app.get("/status", dependencies=[Depends(require_api_token)])
@@ -56,6 +67,7 @@ async def status() -> dict:
         "environment": settings.app_env,
         "memory_items": len(memory.recent(100)),
         "voice": settings.llm_provider == "openai" and bool(settings.openai_api_key),
+        "edith_vision": bool(settings.openai_api_key),
         "hardware_permission_count": len(permissions.list_grants()),
     }
 
@@ -85,16 +97,10 @@ async def list_devices() -> dict[str, list[dict]]:
 
 @app.get("/api/v1/hardware/capabilities", dependencies=[Depends(require_api_token)])
 async def list_hardware_capabilities() -> dict[str, list[dict]]:
-    return {
-        "capabilities": [
-            {
-                "name": capability.name,
-                "description": capability.description,
-                "sensitive": capability.sensitive,
-            }
-            for capability in CAPABILITIES.values()
-        ]
-    }
+    return {"capabilities": [
+        {"name": c.name, "description": c.description, "sensitive": c.sensitive}
+        for c in CAPABILITIES.values()
+    ]}
 
 
 @app.get("/api/v1/hardware/permissions", dependencies=[Depends(require_api_token)])
@@ -112,26 +118,43 @@ async def request_hardware_permission(request: PermissionRequest) -> dict:
 async def grant_hardware_permission(request: PermissionGrantRequest) -> dict:
     capability = get_capability(request.capability)
     grant = permissions.grant(request.device_id, capability.name, request.mode)
-    return {
-        "status": "granted",
-        "grant": {
-            "grant_id": grant.grant_id,
-            "device_id": grant.device_id,
-            "capability": grant.capability,
-            "mode": grant.mode.value,
-            "granted_at": grant.granted_at,
-        },
-    }
+    return {"status": "granted", "grant": {
+        "grant_id": grant.grant_id,
+        "device_id": grant.device_id,
+        "capability": grant.capability,
+        "mode": grant.mode.value,
+        "granted_at": grant.granted_at,
+    }}
 
 
 @app.post("/api/v1/hardware/permissions/revoke", dependencies=[Depends(require_api_token)])
 async def revoke_hardware_permission(request: PermissionRequest) -> dict:
     get_capability(request.capability)
-    return {
-        "status": "revoked" if permissions.revoke(request.device_id, request.capability) else "not_granted",
-        "device_id": request.device_id,
-        "capability": request.capability,
-    }
+    return {"status": "revoked" if permissions.revoke(request.device_id, request.capability) else "not_granted", "device_id": request.device_id, "capability": request.capability}
+
+
+@app.post("/api/v1/hardware/actions", dependencies=[Depends(require_api_token)])
+async def hardware_action(request: HardwareActionRequest) -> dict:
+    try:
+        return await hardware.execute(request.device_id, request.capability, request.action, request.parameters)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/edith/analyze", dependencies=[Depends(require_api_token)])
+async def edith_analyze(file: UploadFile = File(...), prompt: str = "Analyze this scene for E.D.I.T.H.") -> dict:
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+    image = await file.read()
+    if not image:
+        raise HTTPException(status_code=400, detail="Image is empty")
+    if len(image) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image is too large")
+    media_type = file.content_type or "image/jpeg"
+    try:
+        return await vision.analyze(image, media_type, prompt)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"E.D.I.T.H. vision analysis failed: {exc}") from exc
 
 
 @app.post("/api/v1/voice/transcribe", dependencies=[Depends(require_api_token)])
