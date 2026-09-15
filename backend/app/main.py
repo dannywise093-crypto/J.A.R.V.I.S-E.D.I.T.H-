@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from .core.config import settings
 from .core.permissions import PermissionManager, PermissionMode
 from .core.security import require_api_token
+from .core.verification import VerificationManager
 from .hardware.agent_protocol import AgentHello
 from .hardware.agent_registry import AgentRegistry
 from .hardware.audit import AuditLog
@@ -21,11 +22,12 @@ from .tools.system_status import get_system_status
 from .vision.openai_adapter import OpenAIVisionAdapter
 from .voice.openai_adapter import build_openai_voice_service
 
-app = FastAPI(title=settings.app_name, version="0.6.0")
+app = FastAPI(title=settings.app_name, version="0.7.0")
 memory = MemoryStore()
 devices = DeviceRegistry()
 tools = ToolRegistry()
 permissions = PermissionManager()
+verification = VerificationManager()
 hardware = AuthorizedHardwareExecutor(permissions)
 universal_devices = HardwareRegistry(permissions)
 vision = OpenAIVisionAdapter()
@@ -66,6 +68,22 @@ class HardwareActionRequest(BaseModel):
     action: str = Field(min_length=1, max_length=100)
     parameters: dict = Field(default_factory=dict)
     session_id: str | None = Field(default=None, max_length=200)
+    verification_id: str | None = Field(default=None, max_length=100)
+
+
+class VerificationCreateRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    action: str = Field(min_length=1, max_length=200)
+    target: str = Field(min_length=1, max_length=500)
+    impact: str = Field(min_length=1, max_length=2000)
+    risk: str = Field(min_length=1, max_length=50)
+    summary: str = Field(min_length=1, max_length=4000)
+
+
+class VerificationDecisionRequest(BaseModel):
+    approved: bool
+    decided_by: str = Field(min_length=1, max_length=200)
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class UniversalEnrollRequest(BaseModel):
@@ -98,7 +116,7 @@ def require_agent_token(device_id: str, authorization: str | None) -> None:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name, "version": "0.6.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "0.7.0"}
 
 
 @app.get("/status", dependencies=[Depends(require_api_token)])
@@ -112,6 +130,7 @@ async def status() -> dict:
         "hardware_permission_count": len(permissions.list_grants()),
         "universal_device_count": len(universal_devices.list()),
         "agent_count": len(agents.list()),
+        "pending_verifications": sum(1 for item in verification.list(1000) if item["decision"] == "pending"),
     }
 
 
@@ -136,6 +155,35 @@ async def execute_tool(request: ToolRequest) -> dict:
 @app.get("/api/v1/devices", dependencies=[Depends(require_api_token)])
 async def list_devices() -> dict[str, list[dict]]:
     return {"devices": devices.list()}
+
+
+@app.get("/api/v1/verification", dependencies=[Depends(require_api_token)])
+async def list_verification_requests(limit: int = 100) -> dict:
+    return {"requests": verification.list(limit)}
+
+
+@app.post("/api/v1/verification/request", dependencies=[Depends(require_api_token)])
+async def create_verification_request(request: VerificationCreateRequest) -> dict:
+    item = verification.create(request.actor, request.action, request.target, request.impact, request.risk, request.summary)
+    audit.record("verification.requested", request_id=item.request_id, actor=item.actor, action=item.action, target=item.target, risk=item.risk)
+    return {"status": "pending_user_verification", "request": VerificationManager._to_dict(item)}
+
+
+@app.post("/api/v1/verification/{request_id}/decision", dependencies=[Depends(require_api_token)])
+async def decide_verification(request_id: str, request: VerificationDecisionRequest) -> dict:
+    try:
+        item = verification.decide(request_id, request.approved, request.decided_by, request.reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit.record(
+        "verification.approved" if request.approved else "verification.rejected",
+        request_id=request_id,
+        decided_by=request.decided_by,
+        reason=request.reason,
+    )
+    return {"status": item.decision.value, "request": VerificationManager._to_dict(item)}
 
 
 @app.get("/api/v1/hardware/devices", dependencies=[Depends(require_api_token)])
@@ -232,12 +280,15 @@ async def hardware_action(request: HardwareActionRequest) -> dict:
     try:
         spec = get_capability(request.capability)
         grant = permissions.require(request.device_id, spec.name, request.session_id)
+        if request.verification_id is None:
+            raise PermissionError("Human verification is required before this hardware action")
+        verification.require_approved(request.verification_id)
         result = await hardware.execute(request.device_id, request.capability, request.action, request.parameters)
         permissions.consume_once(grant)
-        audit.record("hardware.action", device_id=request.device_id, capability=request.capability, action=request.action, authorized=True)
+        audit.record("hardware.action", device_id=request.device_id, capability=request.capability, action=request.action, verification_id=request.verification_id, authorized=True)
         return result
-    except PermissionError as exc:
-        audit.record("hardware.action.denied", device_id=request.device_id, capability=request.capability, action=request.action, authorized=False)
+    except (PermissionError, KeyError) as exc:
+        audit.record("hardware.action.denied", device_id=request.device_id, capability=request.capability, action=request.action, verification_id=request.verification_id, authorized=False)
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
