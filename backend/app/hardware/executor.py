@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core.capabilities import get_capability
+from .capabilities import get_capability
 from ..core.permissions import PermissionManager
 
 
