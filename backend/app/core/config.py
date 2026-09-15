@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"
     llm_model: str = "jarvis-local"
     openai_api_key: str = ""
+    openai_transcription_model: str = "gpt-4o-transcribe"
+    openai_tts_model: str = "gpt-4o-mini-tts"
     database_url: str = "sqlite:///./jarvis.db"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
