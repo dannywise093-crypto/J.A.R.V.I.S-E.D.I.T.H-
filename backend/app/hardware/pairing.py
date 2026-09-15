@@ -40,7 +40,7 @@ class PairingManager:
             self._sessions[session.pairing_id] = session
         return session
 
-    def consume(self, pairing_id: str, code: str) -> PairingSession:
+    def consume(self, pairing_id: str, code: str, expected_device_id: str | None = None) -> PairingSession:
         now = datetime.now(timezone.utc)
         with self._lock:
             session = self._sessions.get(pairing_id)
@@ -49,6 +49,8 @@ class PairingManager:
             if now >= datetime.fromisoformat(session.expires_at):
                 self._sessions.pop(pairing_id, None)
                 raise PermissionError("Pairing session has expired")
+            if expected_device_id is not None and session.device_id != expected_device_id:
+                raise PermissionError("Pairing identity does not match device")
             if code != session.code:
                 raise PermissionError("Invalid pairing code")
             verified = PairingSession(
