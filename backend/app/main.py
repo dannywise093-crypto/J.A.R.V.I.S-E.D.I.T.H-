@@ -3,7 +3,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .core.config import settings
+from .core.permissions import PermissionManager, PermissionMode
 from .core.security import require_api_token
+from .hardware.capabilities import CAPABILITIES, get_capability
 from .llm.provider import get_llm_provider
 from .memory.store import MemoryStore
 from .tools.device_registry import DeviceRegistry
@@ -11,10 +13,11 @@ from .tools.registry import ToolRegistry
 from .tools.system_status import get_system_status
 from .voice.openai_adapter import build_openai_voice_service
 
-app = FastAPI(title=settings.app_name, version="0.2.0")
+app = FastAPI(title=settings.app_name, version="0.3.0")
 memory = MemoryStore()
 devices = DeviceRegistry()
 tools = ToolRegistry()
+permissions = PermissionManager()
 tools.register("system.status", get_system_status)
 tools.register("devices.list", devices.list)
 
@@ -32,9 +35,18 @@ class SpeakRequest(BaseModel):
     voice: str | None = Field(default=None, max_length=50)
 
 
+class PermissionRequest(BaseModel):
+    device_id: str = Field(min_length=1, max_length=200)
+    capability: str = Field(min_length=1, max_length=100)
+
+
+class PermissionGrantRequest(PermissionRequest):
+    mode: PermissionMode
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name, "version": "0.2.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "0.3.0"}
 
 
 @app.get("/status", dependencies=[Depends(require_api_token)])
@@ -44,6 +56,7 @@ async def status() -> dict:
         "environment": settings.app_env,
         "memory_items": len(memory.recent(100)),
         "voice": settings.llm_provider == "openai" and bool(settings.openai_api_key),
+        "hardware_permission_count": len(permissions.list_grants()),
     }
 
 
@@ -68,6 +81,57 @@ async def execute_tool(request: ToolRequest) -> dict:
 @app.get("/api/v1/devices", dependencies=[Depends(require_api_token)])
 async def list_devices() -> dict[str, list[dict]]:
     return {"devices": devices.list()}
+
+
+@app.get("/api/v1/hardware/capabilities", dependencies=[Depends(require_api_token)])
+async def list_hardware_capabilities() -> dict[str, list[dict]]:
+    return {
+        "capabilities": [
+            {
+                "name": capability.name,
+                "description": capability.description,
+                "sensitive": capability.sensitive,
+            }
+            for capability in CAPABILITIES.values()
+        ]
+    }
+
+
+@app.get("/api/v1/hardware/permissions", dependencies=[Depends(require_api_token)])
+async def list_hardware_permissions() -> dict[str, list[dict]]:
+    return {"grants": permissions.list_grants()}
+
+
+@app.post("/api/v1/hardware/permissions/request", dependencies=[Depends(require_api_token)])
+async def request_hardware_permission(request: PermissionRequest) -> dict:
+    get_capability(request.capability)
+    return permissions.request(request.device_id, request.capability)
+
+
+@app.post("/api/v1/hardware/permissions/grant", dependencies=[Depends(require_api_token)])
+async def grant_hardware_permission(request: PermissionGrantRequest) -> dict:
+    capability = get_capability(request.capability)
+    grant = permissions.grant(request.device_id, capability.name, request.mode)
+    return {
+        "status": "granted",
+        "grant": {
+            "grant_id": grant.grant_id,
+            "device_id": grant.device_id,
+            "capability": grant.capability,
+            "mode": grant.mode.value,
+            "granted_at": grant.granted_at,
+        },
+    }
+
+
+@app.post("/api/v1/hardware/permissions/revoke", dependencies=[Depends(require_api_token)])
+async def revoke_hardware_permission(request: PermissionRequest) -> dict:
+    get_capability(request.capability)
+    return {
+        "status": "revoked" if permissions.revoke(request.device_id, request.capability) else "not_granted",
+        "device_id": request.device_id,
+        "capability": request.capability,
+    }
 
 
 @app.post("/api/v1/voice/transcribe", dependencies=[Depends(require_api_token)])
