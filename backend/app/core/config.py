@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     api_token: str = "change-this-in-development"
     llm_provider: str = "mock"
     llm_model: str = "jarvis-local"
+    openai_api_key: str = ""
     database_url: str = "sqlite:///./jarvis.db"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
