@@ -21,6 +21,7 @@ class PermissionGrant:
     mode: PermissionMode
     granted_at: str
     expires_at: str | None = None
+    session_id: str | None = None
 
 
 class PermissionManager:
@@ -39,7 +40,15 @@ class PermissionManager:
             "allowed_modes": [mode.value for mode in PermissionMode],
         }
 
-    def grant(self, device_id: str, capability: str, mode: PermissionMode) -> PermissionGrant:
+    def grant(
+        self,
+        device_id: str,
+        capability: str,
+        mode: PermissionMode,
+        session_id: str | None = None,
+    ) -> PermissionGrant:
+        if mode == PermissionMode.SESSION and not session_id:
+            raise ValueError("session_id is required for a session permission")
         now = datetime.now(timezone.utc).isoformat()
         grant = PermissionGrant(
             grant_id=str(uuid4()),
@@ -47,6 +56,7 @@ class PermissionManager:
             capability=capability,
             mode=mode,
             granted_at=now,
+            session_id=session_id,
         )
         with self._lock:
             self._grants[(device_id, capability)] = grant
@@ -56,17 +66,30 @@ class PermissionManager:
         with self._lock:
             return self._grants.pop((device_id, capability), None) is not None
 
-    def check(self, device_id: str, capability: str) -> PermissionGrant | None:
+    def check(self, device_id: str, capability: str, session_id: str | None = None) -> PermissionGrant | None:
         with self._lock:
-            return self._grants.get((device_id, capability))
+            grant = self._grants.get((device_id, capability))
+            if grant is None:
+                return None
+            if grant.mode == PermissionMode.SESSION and grant.session_id != session_id:
+                return None
+            return grant
 
-    def require(self, device_id: str, capability: str) -> PermissionGrant:
-        grant = self.check(device_id, capability)
+    def require(self, device_id: str, capability: str, session_id: str | None = None) -> PermissionGrant:
+        grant = self.check(device_id, capability, session_id)
         if grant is None:
             raise PermissionError(
                 f"Hardware capability '{capability}' is not authorized for device '{device_id}'"
             )
         return grant
+
+    def consume_once(self, grant: PermissionGrant) -> None:
+        if grant.mode != PermissionMode.ONCE:
+            return
+        with self._lock:
+            current = self._grants.get((grant.device_id, grant.capability))
+            if current and current.grant_id == grant.grant_id:
+                self._grants.pop((grant.device_id, grant.capability), None)
 
     def list_grants(self) -> list[dict]:
         with self._lock:
@@ -77,6 +100,7 @@ class PermissionManager:
                     "capability": grant.capability,
                     "mode": grant.mode.value,
                     "granted_at": grant.granted_at,
+                    "session_id": grant.session_id,
                 }
                 for grant in self._grants.values()
             ]
