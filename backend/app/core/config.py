@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     api_token: str = "change-this-in-development"
     llm_provider: str = "mock"
     llm_model: str = "jarvis-local"
+    vision_model: str = "gpt-5.6-luna"
     openai_api_key: str = ""
     openai_transcription_model: str = "gpt-4o-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
