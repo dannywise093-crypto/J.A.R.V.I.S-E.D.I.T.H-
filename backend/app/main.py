@@ -88,10 +88,6 @@ class PairingVerifyRequest(BaseModel):
     hello: AgentHello
 
 
-class AgentTokenHeader(BaseModel):
-    token: str
-
-
 def require_agent_token(device_id: str, authorization: str | None) -> None:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Agent authentication required")
@@ -264,16 +260,11 @@ async def list_pairings() -> dict:
 
 @app.post("/api/v1/agents/verify")
 async def verify_agent(request: PairingVerifyRequest) -> dict:
-    if request.hello.device_id != request.hello.device_id:
-        raise HTTPException(status_code=400, detail="Invalid device identity")
     try:
-        session = pairing.consume(request.pairing_id, request.code)
+        session = pairing.consume(request.pairing_id, request.code, request.hello.device_id)
     except PermissionError as exc:
         audit.record("pairing.failed", pairing_id=request.pairing_id, device_id=request.hello.device_id)
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    if session.device_id != request.hello.device_id:
-        audit.record("pairing.identity_mismatch", pairing_id=session.pairing_id, device_id=request.hello.device_id)
-        raise HTTPException(status_code=403, detail="Pairing identity does not match device")
     token = credentials.issue(request.hello.device_id)
     agents.register(
         request.hello.device_id,
