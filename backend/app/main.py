@@ -7,6 +7,7 @@ from .core.permissions import PermissionManager, PermissionMode
 from .core.security import require_api_token
 from .hardware.capabilities import CAPABILITIES, get_capability
 from .hardware.executor import AuthorizedHardwareExecutor
+from .hardware.registry import HardwareRegistry
 from .llm.provider import get_llm_provider
 from .memory.store import MemoryStore
 from .tools.device_registry import DeviceRegistry
@@ -15,12 +16,13 @@ from .tools.system_status import get_system_status
 from .vision.openai_adapter import OpenAIVisionAdapter
 from .voice.openai_adapter import build_openai_voice_service
 
-app = FastAPI(title=settings.app_name, version="0.4.0")
+app = FastAPI(title=settings.app_name, version="0.5.0")
 memory = MemoryStore()
 devices = DeviceRegistry()
 tools = ToolRegistry()
 permissions = PermissionManager()
 hardware = AuthorizedHardwareExecutor(permissions)
+universal_devices = HardwareRegistry(permissions)
 vision = OpenAIVisionAdapter()
 tools.register("system.status", get_system_status)
 tools.register("devices.list", devices.list)
@@ -55,9 +57,18 @@ class HardwareActionRequest(BaseModel):
     parameters: dict = Field(default_factory=dict)
 
 
+class UniversalEnrollRequest(BaseModel):
+    device_id: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=200)
+    system_type: str = Field(min_length=1, max_length=50)
+    transport: str = Field(min_length=1, max_length=100)
+    endpoint: str | None = Field(default=None, max_length=1000)
+    metadata: dict = Field(default_factory=dict)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name, "version": "0.4.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "0.5.0"}
 
 
 @app.get("/status", dependencies=[Depends(require_api_token)])
@@ -69,6 +80,7 @@ async def status() -> dict:
         "voice": settings.llm_provider == "openai" and bool(settings.openai_api_key),
         "edith_vision": bool(settings.openai_api_key),
         "hardware_permission_count": len(permissions.list_grants()),
+        "universal_device_count": len(universal_devices.list()),
     }
 
 
@@ -93,6 +105,45 @@ async def execute_tool(request: ToolRequest) -> dict:
 @app.get("/api/v1/devices", dependencies=[Depends(require_api_token)])
 async def list_devices() -> dict[str, list[dict]]:
     return {"devices": devices.list()}
+
+
+@app.get("/api/v1/hardware/devices", dependencies=[Depends(require_api_token)])
+async def list_hardware_devices() -> dict[str, list[dict]]:
+    return {"devices": universal_devices.list()}
+
+
+@app.post("/api/v1/hardware/devices/enroll", dependencies=[Depends(require_api_token)])
+async def enroll_hardware_device(request: UniversalEnrollRequest) -> dict:
+    try:
+        device = universal_devices.enroll_system(
+            request.device_id,
+            request.name,
+            request.system_type,
+            request.transport,
+            request.endpoint,
+            request.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "enrolled_and_authorized",
+        "device": {
+            "id": device.id,
+            "name": device.name,
+            "platform": device.platform,
+            "transport": device.transport,
+            "endpoint": device.endpoint,
+            "authorized": device.authorized,
+            "adapter_connected": device.adapter is not None,
+        },
+        "next_step": "Attach a concrete authenticated adapter before executing actions.",
+    }
+
+
+@app.post("/api/v1/hardware/devices/{device_id}/revoke", dependencies=[Depends(require_api_token)])
+async def revoke_hardware_device(device_id: str) -> dict:
+    revoked = universal_devices.revoke(device_id)
+    return {"status": "revoked" if revoked else "not_found", "device_id": device_id}
 
 
 @app.get("/api/v1/hardware/capabilities", dependencies=[Depends(require_api_token)])
