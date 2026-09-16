@@ -1,0 +1,28 @@
+name: Continuous Engineering Quality Gate
+
+on:
+  push:
+    branches: [main, feature/voice-ai-v0.2]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Syntax gate
+        run: python -m compileall -q backend/app backend/tests
+
+      - name: Test gate
+        run: pytest -q backend/tests
